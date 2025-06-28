@@ -153,7 +153,9 @@ class Diffusion:
 
         # Unnormalize from [-1,1] back to [0,1] for visualization
         image = (images[0] + 1) / 2
-        image_np = image.permute(1, 2, 0).numpy()  # [C,H,W] → [H,W,C] for matplotlib
+        image_np = image.permute(1, 2, 0).cpu().numpy()  # [C,H,W] → [H,W,C] for matplotlib
+        # Clip to valid range
+        image_np = np.clip(image_np, 0, 1)
 
         plt.imshow(image_np)
         if labels is not None:
@@ -176,12 +178,18 @@ class Diffusion:
         
         # Create subplot grid
         fig, axes = plt.subplots(grid_size, grid_size, figsize=(12, 12))
-        axes = axes.flatten()
+        # Handle case where there's only one subplot
+        if grid_size == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
         
         for i in range(num_images):
             # Unnormalize from [-1,1] back to [0,1] for visualization
             image = (images[i] + 1) / 2
-            image_np = image.permute(1, 2, 0).numpy()  # [C,H,W] → [H,W,C] for matplotlib
+            image_np = image.permute(1, 2, 0).cpu().numpy()  # [C,H,W] → [H,W,C] for matplotlib
+            # Clip to valid range
+            image_np = np.clip(image_np, 0, 1)
             
             axes[i].imshow(image_np)
             if labels is not None:
@@ -295,16 +303,69 @@ class Diffusion:
         model.load_state_dict(checkpoint['model_state_dict'])
         return model
     
-    def generate_samples(self, model, num_samples=16, img_size=(3, 32, 32), device='cpu'):
+    def save_images(self, images, save_path, labels=None):
+        """Save images to disk"""
+        import matplotlib.pyplot as plt
+        import os
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+        
+        # If single image, save it directly
+        if len(images.shape) == 3:  # Single image [C, H, W]
+            image = (images + 1) / 2  # Unnormalize from [-1,1] to [0,1]
+            image_np = image.permute(1, 2, 0).cpu().numpy()
+            # Clip to valid range
+            image_np = np.clip(image_np, 0, 1)
+            plt.figure(figsize=(8, 8))
+            plt.imshow(image_np)
+            plt.axis('off')
+            plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+            plt.close()
+        else:  # Multiple images [B, C, H, W]
+            num_images = images.shape[0]
+            grid_size = int(np.sqrt(num_images))
+            
+            fig, axes = plt.subplots(grid_size, grid_size, figsize=(12, 12))
+            # Handle case where there's only one subplot
+            if grid_size == 1:
+                axes = [axes]
+            else:
+                axes = axes.flatten()
+            
+            for i in range(num_images):
+                image = (images[i] + 1) / 2
+                image_np = image.permute(1, 2, 0).cpu().numpy()
+                # Clip to valid range
+                image_np = np.clip(image_np, 0, 1)
+                axes[i].imshow(image_np)
+                if labels is not None:
+                    axes[i].set_title(f"Label: {labels[i]}")
+                else:
+                    axes[i].set_title(f"Sample {i+1}")
+                axes[i].axis("off")
+            
+            plt.tight_layout()
+            plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+            plt.close()
+        
+        print(f"Images saved to: {save_path}")
+
+    def generate_samples(self, model, num_samples=16, img_size=(3, 32, 32), device='cpu', save_path=None):
         """Generate multiple samples and display them in a grid"""
         samples = self.reverse_diffusion(model, img_size=img_size, device=device, num_samples=num_samples)
         self.show_images_grid(samples, num_images=num_samples)
+        
+        # Save images if path is provided
+        if save_path:
+            self.save_images(samples, save_path)
+        
         return samples
 
 
 def main():
     ### constants
-    timesteps = 3
+    timesteps = 1000
     B_start = 1e-4
     B_end = 2e-2
     
@@ -334,14 +395,17 @@ def main():
     # Save the trained model
     diffusion.save_model(unet, "diffusion_model.pth")
     print("Model saved to diffusion_model.pth")
+    
     # Generate and display samples
     print("Generating samples...")
-    samples = diffusion.generate_samples(unet, num_samples=16, device=device)
+    samples = diffusion.generate_samples(unet, num_samples=16, device=device, save_path="generated_samples.png")
     diffusion.show_images(samples)
     
-    # Also show a single sample
-    # single_sample = diffusion.reverse_diffusion(unet, img_size=(3, 32, 32), device=device)
-    # diffusion.show_images(single_sample)
+    # Save individual samples
+    print("Generating and saving individual samples...")
+    for i in range(50):
+        single_sample = diffusion.reverse_diffusion(unet, img_size=(3, 32, 32), device=device)
+        diffusion.save_images(single_sample, f"sample_{i+1}.png")
 
 
     

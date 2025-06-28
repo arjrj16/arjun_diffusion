@@ -1,4 +1,6 @@
 data
 venv*
 .venv*
-
+sample*
+generated*
+diffusion_model.pth
