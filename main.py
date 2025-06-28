@@ -403,7 +403,7 @@ def main():
     
     # Save individual samples
     print("Generating and saving individual samples...")
-    for i in range(50):
+    for i in range(7):
         single_sample = diffusion.reverse_diffusion(unet, img_size=(3, 32, 32), device=device)
         diffusion.save_images(single_sample, f"sample_{i+1}.png")
 
