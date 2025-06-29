@@ -124,13 +124,28 @@ class UNet(nn.Module):
 class Diffusion:
     def __init__(self, timesteps, B_start, B_end):
         self.timesteps = timesteps
-        self.B_start = B_start
-        self.B_end = B_end
-        self.B_t = torch.linspace(B_start, B_end, timesteps)
+        
+        self.beta = torch.linspace(B_start, B_end, timesteps)
         self.alpha_hat = torch.cumprod(1-self.B_t, dim = 0)
         self.sqrt_alpha_hat = torch.sqrt(self.alpha_hat)
         self.sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alpha_hat)
-        self.time_embedding_dim = 128
+        self.time_embedding_dim = 256
+
+
+def __init__(self, timesteps, B_start, B_end):
++        self.timesteps = timesteps
++        # 1) build the linear β schedule
++        self.beta = torch.linspace(B_start, B_end, timesteps)
++        # 2) basic α, cumulative ᾱ, etc.
++        self.alpha = 1.0 - self.beta
++        self.alphas_cumprod = torch.cumprod(self.alpha, dim=0)
++
++        # 3) the four “lookup tables” your sampler needs
++        self.sqrt_beta = torch.sqrt(self.beta).view(-1,1,1,1)
++        self.one_over_sqrt_alpha = (1/self.alpha.sqrt()).view(-1,1,1,1)
++        self.one_minus_alpha = (1 - self.alpha).view(-1,1,1,1)
++        self.sqrt_one_minus_alphas_cumprod = \
++            torch.sqrt(1 - self.alphas_cumprod).view(-1,1,1,1)
 
     def noise_scheduler(self, t):
         return self.alpha_hat[t]
@@ -165,7 +180,7 @@ class Diffusion:
         plt.axis("off")
         plt.show()
 
-    def show_images_grid(self, images, labels=None, num_images=16):
+    def show_images_grid(self, images, labels=None, num_images=16, show=True):
         import matplotlib.pyplot as plt
         
         # Take first 16 images
@@ -199,7 +214,10 @@ class Diffusion:
             axes[i].axis("off")
         
         plt.tight_layout()
-        plt.show()
+        if show:
+            plt.show()
+        else:
+            plt.close()
 
     def forward_diffusion(self, x_0):
         ts = torch.randint(0, self.timesteps, (x_0.shape[0],), device = x_0.device)
@@ -219,7 +237,7 @@ class Diffusion:
         embedding = torch.cat([torch.sin(ts), torch.cos(ts)], dim = 1)
         return embedding
 
-    def training_loop(self, model, dataloader, optimizer, device, loss_fn, epochs):
+    def training_loop(self, model, dataloader, optimizer, scheduler, device, loss_fn, epochs, sample_save_dir=None, loss_plot_path=None):
         model.train()
         model.to(device)
         self.B_t = self.B_t.to(device)
@@ -227,6 +245,13 @@ class Diffusion:
         self.sqrt_alpha_hat = self.sqrt_alpha_hat.to(device)
         self.sqrt_one_minus_alpha_hat = self.sqrt_one_minus_alpha_hat.to(device)
         
+        # Prepare directories if saving samples
+        import os
+        if sample_save_dir:
+            os.makedirs(sample_save_dir, exist_ok=True)
+
+        epoch_losses = []
+
         for epoch in range(epochs):
             total_loss = 0
             num_batches = 0
@@ -246,6 +271,8 @@ class Diffusion:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 optimizer.step()
+                # Step the scheduler after every parameter update
+                scheduler.step()
                 
                 total_loss += loss.item()
                 num_batches += 1
@@ -254,9 +281,20 @@ class Diffusion:
             avg_loss = total_loss / num_batches
             print(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.6f}")
 
+            # Save samples grid
+            if sample_save_dir:
+                sample_path = os.path.join(sample_save_dir, f"samples_epoch_{epoch+1}.png")
+                # Generate without displaying during training
+                self.generate_samples(model, num_samples=16, img_size=(3,32,32), device=device, save_path=sample_path, show=False)
 
-        
-    def reverse_diffusion(self, model, img_size=(3, 32, 32), device='cpu', num_samples=1):
+            # Record and plot loss curve
+            epoch_losses.append(avg_loss)
+            if loss_plot_path:
+                self.save_loss_plot(epoch_losses, loss_plot_path)
+
+    def reverse_diffusion(self, model, img_size=(3, 32, 32), device=None, num_samples=1):
+        # Default device handling
+        device = torch.device('cpu') if device is None else device
         model.eval()
         model.to(device)
         
@@ -351,16 +389,36 @@ class Diffusion:
         
         print(f"Images saved to: {save_path}")
 
-    def generate_samples(self, model, num_samples=16, img_size=(3, 32, 32), device='cpu', save_path=None):
-        """Generate multiple samples and display them in a grid"""
+    def generate_samples(self, model, num_samples=16, img_size=(3, 32, 32), device=None, save_path=None, show=True):
+        """Generate multiple samples, optionally display, and optionally save to disk"""
+        device = torch.device('cpu') if device is None else device
         samples = self.reverse_diffusion(model, img_size=img_size, device=device, num_samples=num_samples)
-        self.show_images_grid(samples, num_images=num_samples)
-        
+
+        # Display grid if requested
+        if show:
+            self.show_images_grid(samples, num_images=num_samples, show=True)
+
         # Save images if path is provided
         if save_path:
             self.save_images(samples, save_path)
         
         return samples
+
+    def save_loss_plot(self, epoch_losses, save_path):
+        """Save line plot of epoch average losses"""
+        import matplotlib.pyplot as plt
+        import os
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+        plt.figure()
+        plt.plot(range(1, len(epoch_losses)+1), epoch_losses, marker='o')
+        plt.xlabel('Epoch')
+        plt.ylabel('Average Loss')
+        plt.title('Training Loss Curve')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(save_path, bbox_inches='tight')
+        plt.close()
 
 
 def main():
@@ -383,23 +441,43 @@ def main():
     diffusion = Diffusion(timesteps, B_start, B_end)
     
     # Model and training setup
-    unet = UNet(time_embedding_dim=128)
+    TIME_EMB_DIM = 256
+    unet = UNet(time_embedding_dim=TIME_EMB_DIM)
     dataloader = diffusion.load_data()
-    optimizer = torch.optim.Adam(unet.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(unet.parameters(), lr=2e-4, weight_decay=1e-4)
+    # Cosine annealing LR scheduler
+    EPOCHS = 50
+    total_steps = EPOCHS * len(dataloader)  # epochs * iterations per epoch
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-5)
     loss_fn = nn.MSELoss()
 
     # Training
     print("Starting training...")
-    diffusion.training_loop(unet, dataloader, optimizer, device=device, loss_fn=loss_fn, epochs=10)
+    diffusion.training_loop(
+        unet,
+        dataloader,
+        optimizer,
+        scheduler,
+        device=device,
+        loss_fn=loss_fn,
+        epochs=EPOCHS,
+        sample_save_dir="epoch_samples",
+        loss_plot_path="loss_curve.png"
+    )
     
     # Save the trained model
     diffusion.save_model(unet, "diffusion_model.pth")
     print("Model saved to diffusion_model.pth")
     
     # Generate and display samples
-    print("Generating samples...")
-    samples = diffusion.generate_samples(unet, num_samples=16, device=device, save_path="generated_samples.png")
-    diffusion.show_images(samples)
+    print("Generating samples (final)...")
+    samples = diffusion.generate_samples(
+        unet,
+        num_samples=16,
+        device=device,
+        save_path="generated_samples.png",
+        show=False
+    )
     
     # Save individual samples
     print("Generating and saving individual samples...")
