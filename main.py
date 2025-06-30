@@ -124,28 +124,21 @@ class UNet(nn.Module):
 class Diffusion:
     def __init__(self, timesteps, B_start, B_end):
         self.timesteps = timesteps
-        
-        self.beta = torch.linspace(B_start, B_end, timesteps)
+        self.B_start = B_start
+        self.B_end = B_end
+        self.B_t = torch.linspace(B_start, B_end, timesteps)
         self.alpha_hat = torch.cumprod(1-self.B_t, dim = 0)
         self.sqrt_alpha_hat = torch.sqrt(self.alpha_hat)
         self.sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alpha_hat)
-        self.time_embedding_dim = 256
+        self.time_embedding_dim = 128
 
-
-def __init__(self, timesteps, B_start, B_end):
-+        self.timesteps = timesteps
-+        # 1) build the linear β schedule
-+        self.beta = torch.linspace(B_start, B_end, timesteps)
-+        # 2) basic α, cumulative ᾱ, etc.
-+        self.alpha = 1.0 - self.beta
-+        self.alphas_cumprod = torch.cumprod(self.alpha, dim=0)
-+
-+        # 3) the four “lookup tables” your sampler needs
-+        self.sqrt_beta = torch.sqrt(self.beta).view(-1,1,1,1)
-+        self.one_over_sqrt_alpha = (1/self.alpha.sqrt()).view(-1,1,1,1)
-+        self.one_minus_alpha = (1 - self.alpha).view(-1,1,1,1)
-+        self.sqrt_one_minus_alphas_cumprod = \
-+            torch.sqrt(1 - self.alphas_cumprod).view(-1,1,1,1)
+        # --- pre-compute per-timestep quantities for sampling ---
+        self.alpha_t = 1.0 - self.B_t                      # α_t = 1 − β_t
+        self.sqrt_alpha_t = torch.sqrt(self.alpha_t)       # √α_t
+        self.sqrt_recip_alpha_t = torch.sqrt(1.0 / self.alpha_t)  # 1/√α_t
+        self.sqrt_beta_t = torch.sqrt(self.B_t)            # √β_t
+        # β_t / √(1− \bar{α}_t) term used in DDPM update
+        self.beta_over_sqrt_one_minus_alphabar = self.B_t / self.sqrt_one_minus_alpha_hat
 
     def noise_scheduler(self, t):
         return self.alpha_hat[t]
@@ -244,6 +237,12 @@ def __init__(self, timesteps, B_start, B_end):
         self.alpha_hat = self.alpha_hat.to(device)
         self.sqrt_alpha_hat = self.sqrt_alpha_hat.to(device)
         self.sqrt_one_minus_alpha_hat = self.sqrt_one_minus_alpha_hat.to(device)
+        # move sampling buffers
+        self.alpha_t = self.alpha_t.to(device)
+        self.sqrt_alpha_t = self.sqrt_alpha_t.to(device)
+        self.sqrt_recip_alpha_t = self.sqrt_recip_alpha_t.to(device)
+        self.sqrt_beta_t = self.sqrt_beta_t.to(device)
+        self.beta_over_sqrt_one_minus_alphabar = self.beta_over_sqrt_one_minus_alphabar.to(device)
         
         # Prepare directories if saving samples
         import os
@@ -293,40 +292,31 @@ def __init__(self, timesteps, B_start, B_end):
                 self.save_loss_plot(epoch_losses, loss_plot_path)
 
     def reverse_diffusion(self, model, img_size=(3, 32, 32), device=None, num_samples=1):
-        # Default device handling
+        """DDPM sampling (ancestral) starting from pure Gaussian noise."""
         device = torch.device('cpu') if device is None else device
         model.eval()
         model.to(device)
-        
+
         with torch.no_grad():
-            # Start with pure noise
-            x_t = torch.randn(num_samples, *img_size).to(device)
+            x = torch.randn(num_samples, *img_size, device=device)
 
-            for t in reversed(range(self.timesteps)):
-                ts = torch.full((num_samples,), t, device=device, dtype=torch.long)
-                time_emb = self.get_timestep_embedding(ts)
+            for i in range(self.timesteps - 1, -1, -1):
+                t = torch.full((num_samples,), i, device=device, dtype=torch.long)
+                time_emb = self.get_timestep_embedding(t)
 
-                # Predict noise
-                pred_noise = model(x_t, ts, time_emb)
+                eps_theta = model(x, t, time_emb)
 
-                # Get noise schedule values for current timestep
-                alpha_hat_t = self.alpha_hat[t].to(device)
-                alpha_hat_prev = self.alpha_hat[t-1].to(device) if t > 0 else torch.tensor(1.0).to(device)
-                beta_t = self.B_t[t].to(device)
+                coef1 = self.sqrt_recip_alpha_t[i]
+                coef2 = self.beta_over_sqrt_one_minus_alphabar[i]
+                mean   = coef1 * (x - coef2 * eps_theta)
 
-                # Compute predicted x_0
-                pred_x0 = (x_t - torch.sqrt(1 - alpha_hat_t) * pred_noise) / torch.sqrt(alpha_hat_t)
-
-                # Compute mean of x_{t-1}
-                if t > 0:
-                    mean = torch.sqrt(alpha_hat_prev) * pred_x0 + torch.sqrt(1 - alpha_hat_prev) * pred_noise
-                    # Add noise for stochasticity
-                    noise = torch.randn_like(x_t)
-                    x_t = mean + torch.sqrt(beta_t) * noise
+                if i > 0:
+                    noise = torch.randn_like(x)
+                    x = mean + self.sqrt_beta_t[i] * noise
                 else:
-                    x_t = pred_x0  # Final clean sample
+                    x = mean  # final image
 
-        return x_t
+        return x
                 
     def save_model(self, model, path):
         torch.save({
