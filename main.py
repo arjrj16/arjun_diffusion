@@ -122,7 +122,7 @@ class UNet(nn.Module):
 
 
 class Diffusion:
-    def __init__(self, timesteps, B_start, B_end):
+    def __init__(self, timesteps, B_start, B_end, time_embedding_dim: int = 128):
         self.timesteps = timesteps
         self.B_start = B_start
         self.B_end = B_end
@@ -130,7 +130,7 @@ class Diffusion:
         self.alpha_hat = torch.cumprod(1-self.B_t, dim = 0)
         self.sqrt_alpha_hat = torch.sqrt(self.alpha_hat)
         self.sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alpha_hat)
-        self.time_embedding_dim = 128
+        self.time_embedding_dim = time_embedding_dim
 
         # --- pre-compute per-timestep quantities for sampling ---
         self.alpha_t = 1.0 - self.B_t                      # α_t = 1 − β_t
@@ -428,10 +428,10 @@ def main():
     print(f"Using device: {device}")
     
     # Initialize diffusion process
-    diffusion = Diffusion(timesteps, B_start, B_end)
+    TIME_EMB_DIM = 256
+    diffusion = Diffusion(timesteps, B_start, B_end, time_embedding_dim=TIME_EMB_DIM)
     
     # Model and training setup
-    TIME_EMB_DIM = 256
     unet = UNet(time_embedding_dim=TIME_EMB_DIM)
     dataloader = diffusion.load_data()
     optimizer = torch.optim.Adam(unet.parameters(), lr=2e-4, weight_decay=1e-4)
